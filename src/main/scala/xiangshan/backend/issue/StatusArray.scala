@@ -24,6 +24,7 @@ import utils._
 import utility._
 import xiangshan.backend.rob.RobPtr
 import xiangshan.mem.{SqPtr, MemWaitUpdateReq}
+import xiangshan.mem.mdp._
 
 class StatusArrayUpdateIO(params: RSParams)(implicit p: Parameters) extends Bundle {
   val enable = Input(Bool())
@@ -50,6 +51,7 @@ class StatusEntry(params: RSParams)(implicit p: Parameters) extends XSBundle {
   val waitForStoreData = Bool()
   val strictWait = Bool()
   val sqIdx = new SqPtr
+  val oraclePtr = new MdpPtr
   // misc
   val isFirstIssue = Bool()
 
@@ -244,6 +246,7 @@ class StatusArray(params: RSParams)(implicit p: Parameters) extends XSModule
     statusNext.srcType := Mux(updateValid(i), updateVal(i).srcType, status.srcType)
     statusNext.robIdx := Mux(updateValid(i), updateVal(i).robIdx, status.robIdx)
     statusNext.sqIdx := Mux(updateValid(i), updateVal(i).sqIdx, status.sqIdx)
+    statusNext.oraclePtr := Mux(updateValid(i), updateVal(i).oraclePtr, status.oraclePtr)
 
     // isFirstIssue: indicate whether the entry has been issued before
     // When the entry is not granted to issue, set isFirstIssue to false.B

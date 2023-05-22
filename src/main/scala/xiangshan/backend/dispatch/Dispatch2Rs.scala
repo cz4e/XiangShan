@@ -210,7 +210,7 @@ class Dispatch2RsDistinctImp(outer: Dispatch2Rs)(implicit p: Parameters) extends
         enqLsq.req(i).bits := io.in(i).bits
         in(i).bits.lqIdx := enqLsq.resp(i).lqIdx
         in(i).bits.sqIdx := enqLsq.resp(i).sqIdx
-
+        in(i).bits.oraclePtr := enqLsq.resp(i).oraclePtr
         enqLsq.req(i).valid := in(i).valid && VecInit(s0_out.map(_.ready)).asUInt.andR
       }
     }

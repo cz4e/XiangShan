@@ -138,7 +138,7 @@ class LoadUnit_S0(implicit p: Parameters) extends XSModule with HasDCacheParamet
   val lfsrc1_highconfhwPrefetch_valid = io.prefetch_in.valid && io.prefetch_in.bits.confidence > 0.U
   val lfsrc2_intloadFirstIssue_valid = io.in.valid // int flow first issue or software prefetch
   val lfsrc3_vecloadFirstIssue_valid = WireInit(false.B) // TODO
-  val lfsrc4_l2lForward_valid = io.fastpath.valid
+  val lfsrc4_l2lForward_valid = io.fastpath.valid && EnableLoadToLoadForward.B
   val lfsrc5_lowconfhwPrefetch_valid = io.prefetch_in.valid && io.prefetch_in.bits.confidence === 0.U
   dontTouch(lfsrc0_loadReplay_valid)
   dontTouch(lfsrc1_highconfhwPrefetch_valid)
@@ -275,7 +275,7 @@ class LoadUnit_S0(implicit p: Parameters) extends XSModule with HasDCacheParamet
     s0_vaddr := io.in.bits.src(0) + SignExt(imm12, VAddrBits)
     s0_mask := genWmask(s0_vaddr, io.in.bits.uop.ctrl.fuOpType(1,0))
     s0_uop := io.in.bits.uop
-    s0_isFirstIssue := io.in.bits.uop.ctrl.isFirstIssue
+    s0_isFirstIssue := true.B
     s0_sqIdx := io.in.bits.uop.sqIdx
     val issueUopIsPrefetch = WireInit(LSUOpType.isPrefetch(io.in.bits.uop.ctrl.fuOpType))
     when (issueUopIsPrefetch) {
@@ -292,6 +292,12 @@ class LoadUnit_S0(implicit p: Parameters) extends XSModule with HasDCacheParamet
       // we dont care s0_isFirstIssue and s0_rsIdx and s0_sqIdx in S0 when trying pointchasing
       // because these signals will be updated in S1
       s0_isFirstIssue := true.B
+      s0_sqIdx := DontCare
+    } else {
+      s0_vaddr := DontCare
+      s0_uop.ctrl.fuOpType := DontCare
+      s0_mask := DontCare
+      s0_isFirstIssue := DontCare
       s0_sqIdx := DontCare
     }
   }
@@ -346,8 +352,8 @@ class LoadUnit_S0(implicit p: Parameters) extends XSModule with HasDCacheParamet
   XSPerfAccumulate("in_valid", io.in.valid)
   XSPerfAccumulate("in_fire", io.in.fire)
   XSPerfAccumulate("in_fire_first_issue", s0_valid && s0_isFirstIssue)
-  XSPerfAccumulate("lsq_fire_first_issue", io.replay.valid && io.replay.bits.isFirstIssue)
-  XSPerfAccumulate("ldu_fire_first_issue", io.in.valid && io.isFirstIssue)
+  XSPerfAccumulate("lsq_fire_first_issue", io.replay.fire)
+  XSPerfAccumulate("ldu_fire_first_issue", io.in.fire && io.isFirstIssue)
   XSPerfAccumulate("stall_out", io.out.valid && !io.out.ready && io.dcacheReq.ready)
   XSPerfAccumulate("stall_dcache", io.out.valid && io.out.ready && !io.dcacheReq.ready)
   XSPerfAccumulate("addr_spec_success", io.out.fire && s0_vaddr(VAddrBits-1, 12) === io.in.bits.src(0)(VAddrBits-1, 12))
@@ -377,7 +383,6 @@ class LoadUnit_S1(implicit p: Parameters) extends XSModule with HasCircularQueue
     val sbuffer = new LoadForwardQueryIO
     val lsq = new PipeLoadForwardQueryIO
     val reExecuteQuery = Flipped(Vec(StorePipelineWidth, Valid(new LoadReExecuteQueryIO)))
-    val correctTableQueryReq = Output(new CorrectTableQueryReq)
     val csrCtrl = Flipped(new CustomCSRCtrlIO)
   })
 
@@ -430,8 +435,6 @@ class LoadUnit_S1(implicit p: Parameters) extends XSModule with HasCircularQueue
                           isAfter(io.in.bits.uop.robIdx, io.reExecuteQuery(w).bits.robIdx) && 
                           (s1_paddr_dup_lsu(PAddrBits-1, 3) === io.reExecuteQuery(w).bits.paddr(PAddrBits-1, 3)) &&
                           (s1_mask & io.reExecuteQuery(w).bits.mask).orR)).asUInt.orR && !s1_tlb_miss
-  //  mdp read
-  io.correctTableQueryReq.addr := io.in.bits.uop.cf.foldpc
 
   // Generate forwardMaskFast to wake up insts earlier
   val forwardMaskFast = io.lsq.forwardMaskFast.asUInt | io.sbuffer.forwardMaskFast.asUInt
@@ -445,7 +448,7 @@ class LoadUnit_S1(implicit p: Parameters) extends XSModule with HasCircularQueue
   // * st-ld violation check
   // * dcache bank conflict
   io.out.bits.replayInfo.cause(LoadReplayCauses.schedError) := s1_schedError && !s1_is_sw_prefetch
-  io.out.bits.replayInfo.cause(LoadReplayCauses.bankConflict) := s1_bank_conflict && !s1_is_sw_prefetch
+  io.out.bits.replayInfo.cause(LoadReplayCauses.bankConflict) := s1_bank_conflict && !s1_is_sw_prefetch 
   io.out.bits.replayInfo.debug := io.in.bits.uop.debugInfo
 
   // current ori test will cause the case of ldest == 0, below will be modifeid in the future.
@@ -485,10 +488,8 @@ class LoadUnit_S2(implicit p: Parameters) extends XSModule
     val dataForwarded = Output(Bool())
     val fullForward = Output(Bool())
     val dcache_kill = Output(Bool())
-    val correctTableQueryResp = Input(new CorrectTableQueryResp)
     val loadLoadViolationQueryReq = DecoupledIO(new LoadViolationQueryReq)
     val storeLoadViolationQueryReq = DecoupledIO(new LoadViolationQueryReq)
-    val correctTableUpdate = Valid(new CorrectTableUpdate)
     val csrCtrl = Flipped(new CustomCSRCtrlIO)
     val static_pm = Input(Valid(Bool())) // valid for static, bits for mmio
     val loadDataFromDcache = Output(new LoadDataFromDcacheBundle)
@@ -510,6 +511,12 @@ class LoadUnit_S2(implicit p: Parameters) extends XSModule
     val s2_forward_fail = Output(Bool())
     val s2_can_replay_from_fetch = Output(Bool()) // dirty code
     val s2_dcache_require_replay = Output(Bool()) // dirty code
+
+    val sqDeqPtr = Input(new SqPtr)
+    val sqEnqPtr = Input(new SqPtr)
+    val sqCount = Input(UInt(64.W))
+    val oracleMDPQuery = Flipped(new OracleMDPQuery())
+    val stAddrReadyVec = Input(Vec(StoreQueueSize, Bool()))
   })
 
   val pmp = WireInit(io.pmpResp)
@@ -565,16 +572,28 @@ class LoadUnit_S2(implicit p: Parameters) extends XSModule
   val s2_cache_replay = io.dcacheResp.bits.replay && !forward_D_or_mshr_valid
   val s2_cache_tag_error = io.dcacheResp.bits.tag_error
   val s2_forward_fail = io.lsq.matchInvalid || io.sbuffer.matchInvalid
-  val s2_wait_store = io.in.bits.isFirstIssue &&
-                      io.correctTableQueryResp.strict &&
-                      io.in.bits.uop.cf.loadWaitBit && 
-                      isAfter(io.in.bits.uop.robIdx, io.in.bits.uop.cf.waitForRobIdx) &&
-                      !io.lsq.issued &&
-                      !s2_is_prefetch
   val s2_data_invalid = io.lsq.dataInvalid && !s2_exception
   val s2_fullForward = WireInit(false.B)
 
+  io.oracleMDPQuery.req.oraclePtr := io.in.bits.uop.oraclePtr
+  io.oracleMDPQuery.req.vaddr := io.in.bits.vaddr
+  io.oracleMDPQuery.req.sqIdx := io.in.bits.uop.sqIdx
+  io.oracleMDPQuery.req.sqCount := io.sqCount
+  io.oracleMDPQuery.req.sqDeqPtr := io.sqDeqPtr.value
 
+  val s2_wait_store_sqIdx = Wire(new SqPtr) 
+  val s2_wait_store_sqIdx_value = io.oracleMDPQuery.resp.distance
+  s2_wait_store_sqIdx.flag := Mux(!(io.in.bits.uop.sqIdx.flag ^ io.sqDeqPtr.flag) || s2_wait_store_sqIdx_value >= io.sqDeqPtr.value, io.sqDeqPtr.flag, io.sqEnqPtr.flag)
+  s2_wait_store_sqIdx.value := s2_wait_store_sqIdx_value
+  val s2_wait_store = io.oracleMDPQuery.resp.hit && 
+                      !io.stAddrReadyVec(s2_wait_store_sqIdx.value) &&
+                      !s2_mmio && !s2_is_prefetch
+                      // io.in.bits.uop.cf.storeSetHit && 
+                      // !io.lsq.issued &&
+                      // io.lsq.addrInvalid &&
+                      // !s2_mmio &&
+                      // !s2_is_prefetch
+  
   io.s2_forward_fail := s2_forward_fail
   io.dcache_kill := pmp.ld || pmp.mmio // move pmp resp kill to outside
   io.dcacheResp.ready := true.B
@@ -593,19 +612,14 @@ class LoadUnit_S2(implicit p: Parameters) extends XSModule
                               (s2_mask & io.reExecuteQuery(w).bits.mask).orR)).asUInt.orR &&
                               !s2_tlb_miss 
 
-  // update mdp
-  io.correctTableUpdate.valid := io.in.valid && io.in.bits.uop.cf.loadWaitBit && !s2_is_prefetch && !s2_tlb_miss && !s2_mmio && !io.lsq.issued && !io.lsq.addrInvalid
-  io.correctTableUpdate.bits.addr := io.in.bits.uop.cf.foldpc
-  io.correctTableUpdate.bits.strict := false.B
-  io.correctTableUpdate.bits.violation := io.lsq.storeSetHit
-
   // need allocate new entry
   val s2_allocValid = !s2_tlb_miss && 
                       !s2_is_prefetch && 
                       !s2_exception && 
                       !s2_mmio  && 
                       !s2_wait_store && 
-                      !io.in.bits.replayInfo.cause(LoadReplayCauses.schedError) 
+                      !io.out.bits.replayInfo.cause(LoadReplayCauses.schedError) 
+
   // ld-ld violation require
   io.loadLoadViolationQueryReq.valid := io.in.valid && s2_allocValid
   io.loadLoadViolationQueryReq.bits.uop := io.in.bits.uop
@@ -675,7 +689,7 @@ class LoadUnit_S2(implicit p: Parameters) extends XSModule
   io.feedbackFast.bits.hit := false.B 
   io.feedbackFast.bits.flushState := io.in.bits.ptwBack
   io.feedbackFast.bits.rsIdx := io.in.bits.rsIdx 
-  io.feedbackFast.bits.sourceType := DontCare
+  io.feedbackFast.bits.sourceType := RSFeedbackType.lrqFull
   io.feedbackFast.bits.dataInvalidSqIdx := DontCare
 
   io.out.valid := io.in.valid && !io.feedbackFast.valid && !s2_is_hw_prefetch // hardware prefetch flow should not be writebacked 
@@ -773,14 +787,14 @@ class LoadUnit_S2(implicit p: Parameters) extends XSModule
   io.out.bits.replayInfo.cause(LoadReplayCauses.rejectEnq) := s2_rejectEnq && !s2_mmio && !s2_is_prefetch && !s2_exception
   io.out.bits.replayInfo.canForwardFullData := io.dataForwarded
   io.out.bits.replayInfo.dataInvalidSqIdx := io.dataInvalidSqIdx
-  io.out.bits.replayInfo.addrInvalidSqIdx := io.addrInvalidSqIdx
+  io.out.bits.replayInfo.addrInvalidSqIdx := s2_wait_store_sqIdx // io.in.bits.uop.sqIdx - io.oracleMDPQuery.resp.distance // io.addrInvalidSqIdx
   io.out.bits.replayInfo.replayCarry := io.dcacheResp.bits.replayCarry
   io.out.bits.replayInfo.missMSHRId := io.dcacheResp.bits.mshr_id
   io.out.bits.replayInfo.dataInLastBeat := io.in.bits.paddr(log2Up(refillBytes))
   io.out.bits.replayInfo.debug := io.in.bits.uop.debugInfo
 
   // To be removed
-  val s2_need_replay_from_rs = WireInit(false.B)  // never replay from rs
+  val s2_need_replay_from_rs = WireInit(false.B)
   // s2_cache_replay is quite slow to generate, send it separately to LQ
   if (EnableFastForward) {
     io.s2_dcache_require_replay := s2_cache_replay && !fullForward
@@ -855,14 +869,17 @@ class LoadUnit(implicit p: Parameters) extends XSModule
     // load unit ctrl
     val csrCtrl = Flipped(new CustomCSRCtrlIO)
 
-    val correctTableQuery = new CorrectTableQueryIO
-    val correctTableUpdate = Valid(new CorrectTableUpdate)
     val reExecuteQuery = Flipped(Vec(StorePipelineWidth, Valid(new LoadReExecuteQueryIO)))    // load replay
     val replay = Flipped(Decoupled(new LsPipelineBundle))
     val debug_ls = Output(new DebugLsInfoBundle)
     val s2IsPointerChasing = Output(Bool()) // provide right pc for hw prefetch
     val lqReplayFull = Input(Bool())
     val lqReplayCanAccept = Input(Bool())
+
+    val sqDeqPtr = Input(new SqPtr)
+    val sqEnqPtr = Input(new SqPtr)
+    val oracleMDPQuery = Flipped(new OracleMDPQuery())
+    val stAddrReadyVec = Input(Vec(StoreQueueSize, Bool()))
   })
 
   val load_s0 = Module(new LoadUnit_S0)
@@ -902,7 +919,6 @@ class LoadUnit(implicit p: Parameters) extends XSModule
   load_s1.io.dcacheBankConflict <> io.dcache.s1_bank_conflict
   load_s1.io.csrCtrl <> io.csrCtrl
   load_s1.io.reExecuteQuery := io.reExecuteQuery
-  load_s1.io.correctTableQueryReq <> io.correctTableQuery.req
 
   // when S0 has opportunity to try pointerchasing, make sure it truely goes to S1
   // which is S0's out is ready and dcache is ready
@@ -998,7 +1014,6 @@ class LoadUnit(implicit p: Parameters) extends XSModule
   load_s2.io.lsq.forwardMaskFast <> io.lsq.forward.forwardMaskFast // should not be used in load_s2
   load_s2.io.lsq.dataInvalid <> io.lsq.forward.dataInvalid
   load_s2.io.lsq.matchInvalid <> io.lsq.forward.matchInvalid
-  load_s2.io.lsq.storeSetHit <> io.lsq.forward.storeSetHit
   load_s2.io.lsq.addrInvalid <> io.lsq.forward.addrInvalid
   load_s2.io.lsq.issued <> io.lsq.forward.issued
   load_s2.io.sbuffer.forwardData <> io.sbuffer.forwardData
@@ -1006,7 +1021,6 @@ class LoadUnit(implicit p: Parameters) extends XSModule
   load_s2.io.sbuffer.forwardMaskFast <> io.sbuffer.forwardMaskFast // should not be used in load_s2
   load_s2.io.sbuffer.dataInvalid <> io.sbuffer.dataInvalid // always false
   load_s2.io.sbuffer.matchInvalid <> io.sbuffer.matchInvalid
-  load_s2.io.sbuffer.storeSetHit := DontCare // useless 
   load_s2.io.sbuffer.addrInvalid := DontCare // useless
   load_s2.io.sbuffer.issued := DontCare // useless
   load_s2.io.dataInvalidSqIdx <> io.lsq.forward.dataInvalidSqIdx // provide dataInvalidSqIdx to make wakeup faster
@@ -1014,15 +1028,15 @@ class LoadUnit(implicit p: Parameters) extends XSModule
   load_s2.io.csrCtrl <> io.csrCtrl
   load_s2.io.sentFastUop := io.fastUop.valid
   load_s2.io.reExecuteQuery := io.reExecuteQuery
-  load_s2.io.correctTableQueryResp <> io.correctTableQuery.resp
   load_s2.io.loadLoadViolationQueryReq <> io.lsq.loadLoadViolationQuery.req
   load_s2.io.storeLoadViolationQueryReq <> io.lsq.storeLoadViolationQuery.req
   load_s2.io.feedbackFast <> io.feedbackFast
   load_s2.io.lqReplayFull <> io.lqReplayFull
-  // update mdp is load_s3
-  io.correctTableUpdate := RegNext(load_s2.io.correctTableUpdate)
-
-
+  load_s2.io.sqDeqPtr <> io.sqDeqPtr 
+  load_s2.io.sqEnqPtr <> io.sqEnqPtr
+  load_s2.io.sqCount := distanceBetween(load_s2.io.in.bits.uop.sqIdx, io.sqDeqPtr)
+  load_s2.io.oracleMDPQuery <> io.oracleMDPQuery
+  load_s2.io.stAddrReadyVec <> io.stAddrReadyVec
   // pre-calcuate sqIdx mask in s0, then send it to lsq in s1 for forwarding
   val sqIdxMaskReg = RegNext(UIntToMask(load_s0.io.s0_sqIdx.value, StoreQueueSize))
   // to enable load-load, sqIdxMask must be calculated based on loadIn.uop
@@ -1157,7 +1171,7 @@ class LoadUnit(implicit p: Parameters) extends XSModule
   io.feedbackSlow.bits.hit := !io.lsq.loadIn.bits.replayInfo.needReplay() || io.lqReplayCanAccept
   io.feedbackSlow.bits.flushState := s3_loadOutBits.ptwBack
   io.feedbackSlow.bits.rsIdx := s3_loadOutBits.rsIdx
-  io.feedbackSlow.bits.sourceType := DontCare
+  io.feedbackSlow.bits.sourceType := RSFeedbackType.lrqFull
   io.feedbackSlow.bits.dataInvalidSqIdx := DontCare
 
   val s3_loadWbMeta = Mux(hitLoadOut.valid, hitLoadOut.bits, io.lsq.loadOut.bits)

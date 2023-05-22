@@ -31,6 +31,20 @@ import xiangshan.mem.mdp._
 import utils._
 import utility._
 
+object SelectFirstN {
+  def apply(in: UInt, n: Int, valid: Seq[Bool]) = {
+    val sels = Wire(Vec(n, UInt(in.getWidth.W)))
+    var mask = in
+
+    for (i <- 0 until n) {
+      sels(i) := PriorityEncoderOH(mask) & Fill(in.getWidth, valid(i))
+      mask = mask & ~sels(i)
+    }
+
+    sels
+  }
+}
+
 object LoadReplayCauses {
   // these causes have priority, lower coding has higher priority.
   // when load replay happens, load unit will select highest priority
@@ -226,18 +240,21 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
   val needReplay = io.enq.map(enq => enq.bits.replayInfo.needReplay())
   val hasExceptions = io.enq.map(enq => ExceptionNO.selectByFu(enq.bits.uop.cf.exceptionVec, lduCfg).asUInt.orR && !enq.bits.tlbMiss)
   val loadReplay = io.enq.map(enq => enq.bits.isLoadReplay)
-  val canEnqueueVec = VecInit((0 until LoadPipelineWidth).map(w => {
+
+
+  val needEnqueue = (0 until LoadPipelineWidth).map(w => {
     canEnqueue(w) && !cancelEnq(w) && needReplay(w) && !hasExceptions(w) 
-  }))
+  })
+  val canEnqueueVec = VecInit(needEnqueue)
   val canFreeVec = VecInit((0 until LoadPipelineWidth).map(w => {
     canEnqueue(w) && loadReplay(w) && (!needReplay(w) || hasExceptions(w))
   }))
 
   // select LoadPipelineWidth valid index.
+
+
   val selectMask = ~allocated.asUInt
-  val select0IndexOH = PriorityEncoderOH(selectMask)
-  val select1IndexOH = Reverse(PriorityEncoderOH(Reverse(selectMask)))
-  val selectIndexOH = VecInit(Seq(select0IndexOH, select1IndexOH))
+  val selectIndexOH = SelectFirstN(selectMask, LoadPipelineWidth, needEnqueue)
   val lqFull = allocated.asUInt.andR 
   val lqFreeNums = PopCount(~allocated.asUInt)
 
@@ -248,7 +265,7 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
   val addrNotBlockVec = Wire(Vec(LoadQueueReplaySize, Bool()))
   val dataNotBlockVec = Wire(Vec(LoadQueueReplaySize, Bool()))
   val storeAddrValidVec = addrNotBlockVec.asUInt | storeAddrInSameCycleVec.asUInt
-  val storesleepVec = dataNotBlockVec.asUInt | storeDataInSameCycleVec.asUInt
+  val storeDataValidVec = dataNotBlockVec.asUInt | storeDataInSameCycleVec.asUInt
 
   // store data valid check
   val stAddrReadyVec = io.stAddrReadyVec
@@ -284,7 +301,7 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
   // store data issue check
   val stDataDeqVec = Wire(Vec(LoadQueueReplaySize, Bool()))
   (0 until LoadQueueReplaySize).map(i => {
-    stDataDeqVec(i) := allocated(i) && storesleepVec(i)
+    stDataDeqVec(i) := allocated(i) && storeDataValidVec(i)
   })
 
   // update block condition
@@ -337,7 +354,7 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
   val oldestPtr = VecInit((0 until CommitWidth).map(x => io.ldIssuePtr + x.U))
   val oldestSelMask = VecInit((0 until LoadQueueReplaySize).map(i => {
     loadReplaySelMask(i) && VecInit(oldestPtr.map(_ === uop(i).lqIdx)).asUInt.orR
-  })).asUInt
+  })).asUInt // use uint instead vec to reduce verilog lines
   val remReplaySelVec = VecInit(Seq.tabulate(LoadPipelineWidth)(rem => getRemBits(loadReplaySelMask)(rem)))
   val remOldestSelVec = VecInit(Seq.tabulate(LoadPipelineWidth)(rem => getRemBits(oldestSelMask)(rem)))
 
@@ -354,8 +371,36 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
     val issOldestIndex = OHToUInt(PriorityEncoderOH(remOldestSelVec(rport)))
 
     val oldest = Wire(Valid(UInt()))
+    val oldestSel = Mux(issOldestValid, PriorityEncoderOH(remOldestSelVec(rport)), ageOldest.bits)
+    val oldestBitsVec = Wire(Vec(LoadQueueReplaySize, Bool()))
+    oldestBitsVec.foreach(e => e := false.B)
+    rport match {
+      case 0 => {
+        for (i <- 0 until LoadQueueReplaySize / LoadPipelineWidth) {
+          oldestBitsVec(i * LoadPipelineWidth) := oldestSel(i)
+          oldestBitsVec(i * LoadPipelineWidth + 1) := false.B 
+          oldestBitsVec(i * LoadPipelineWidth + 2) := false.B
+        }
+      }
+      case 1 => {
+        for (i <- 0 until LoadQueueReplaySize / LoadPipelineWidth) {
+          oldestBitsVec(i * LoadPipelineWidth) := false.B
+          oldestBitsVec(i * LoadPipelineWidth + 1) := oldestSel(i)
+          oldestBitsVec(i * LoadPipelineWidth + 2) := false.B
+        }
+      }
+      case 2 => {
+        for (i <- 0 until LoadQueueReplaySize / LoadPipelineWidth) {
+          oldestBitsVec(i * LoadPipelineWidth) := false.B 
+          oldestBitsVec(i * LoadPipelineWidth + 1) := false.B 
+          oldestBitsVec(i * LoadPipelineWidth + 2) := oldestSel(i)
+        }
+      }
+    }
     oldest.valid := ageOldest.valid || issOldestValid
-    oldest.bits := Cat(Mux(issOldestValid, issOldestIndex, ageOldestIndex), rport.U(log2Ceil(LoadPipelineWidth).W))
+    oldest.bits := OHToUInt(oldestBitsVec.asUInt)
+    // oldest.valid := ageOldest.valid || issOldestValid
+    // oldest.bits := Cat(Mux(issOldestValid, issOldestIndex, ageOldestIndex), rport.U(log2Ceil(LoadPipelineWidth).W))
     oldest
   }))
 
@@ -482,6 +527,7 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
       } .elsewhen (replayInfo.cause(LoadReplayCauses.bankConflict) || replayInfo.cause(LoadReplayCauses.schedError)) {
         // normal case: bank conflict or schedule error
         // can replay next cycle
+        creditUpdate(enqIdx) := 0.U
         blockByOthers(enqIdx) := false.B
       }
 

@@ -39,17 +39,17 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
     val deallocate = Vec(LoadPipelineWidth, Flipped(Valid(new LqWriteBundle)))
     val storeIn = Vec(StorePipelineWidth, Flipped(Valid(new LsPipelineBundle)))
     val rollback = Output(Valid(new Redirect)) 
-    val correctTableUpdate = Valid(new CorrectTableUpdate) 
     val stAddrReadySqPtr = Input(new SqPtr)
     val stIssuePtr = Input(new SqPtr)
     val ldIssuePtr = Input(new LqPtr)
-    val lqEmpty = Input(Bool())
     val sqEmpty = Input(Bool())
+    val lqFull = Output(Bool())
+    val violation = Valid(new OracleMDPViolation)
   })
   println("LoadQueueRAWSize: size " + LoadQueueRAWSize)
   //  LoadQueueRAW field
   //  +-------+--------+-------+-------+-----------+
-  //  | Valid |  uop   |PAddr  | Mask  | Datavalid |
+  //  | Valid |  uop   | PAddr | Mask  | Datavalid |
   //  +-------+--------+-------+-------+-----------+
   //
   //  Field descriptions:
@@ -95,72 +95,7 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
 
   // select LoadPipelineWidth valid index.
   val selectMask = ~allocated.asUInt
-  val select0IndexOH = PriorityEncoderOH(selectMask)
-  val select1IndexOH = Reverse(PriorityEncoderOH(Reverse(selectMask)))
-  val selectIndexOH = VecInit(Seq(select0IndexOH, select1IndexOH))
-  
-  // Enqueue
-  for ((enq, w) <- io.query.map(_.req).zipWithIndex) {
-    paddrModule.io.wen(w) := false.B
-    maskModule.io.wen(w) := false.B
-
-    //  Allocate ready 
-    val allocateNums = if (w == 0) 0.U else PopCount(needEnqueue.take(w)) 
-    canAcceptVec(w) := freeNums > allocateNums
-
-    val enqIdx = OHToUInt(selectIndexOH(w))
-    enq.ready := Mux(needEnqueue(w), canAcceptVec(w), true.B)
-
-    when (needEnqueue(w) && canAcceptVec(w)) {
-
-      //  Allocate new entry
-      allocated(enqIdx) := true.B
-
-      //  Write paddr
-      paddrModule.io.wen(w) := true.B 
-      paddrModule.io.waddr(w) := enqIdx 
-      paddrModule.io.wdata(w) := enq.bits.paddr
-
-      //  Write mask
-      maskModule.io.wen(w) := true.B 
-      maskModule.io.waddr(w) := enqIdx 
-      maskModule.io.wdata(w) := enq.bits.mask
-
-      //  Fill info 
-      uop(enqIdx) := enq.bits.uop
-      datavalid(enqIdx) := enq.bits.datavalid
-    }
-  }
-
-  for ((query, w) <- io.query.map(_.resp).zipWithIndex) {
-    query.valid := RegNext(io.query(w).req.valid)
-    query.bits.replayFromFetch := RegNext(false.B)
-  }
-
-
-  //  LoadQueueRAW deallocate
-  for (i <- 0 until LoadQueueRAWSize) {
-    val deqNotBlock = Mux(!allAddrCheck, !isBefore(io.stAddrReadySqPtr, uop(i).sqIdx), true.B)
-    val needCancel = uop(i).robIdx.needFlush(io.redirect)
-
-    when (allocated(i) && (deqNotBlock || needCancel)) {
-      allocated(i) := false.B
-    }
-  }
-
-  // if need replay deallocate entry
-  val lastCanAccept = RegNext(VecInit(needEnqueue.zip(canAcceptVec).map(x => x._1 && x._2)))
-  val lastAllocIndex = RegNext(VecInit(selectIndexOH.map(x => OHToUInt(x))))
-  for ((dealloc, i) <- io.deallocate.zipWithIndex) {
-    val deallocValid = dealloc.valid && lastCanAccept(i)
-    val deallocIndex = lastAllocIndex(i)
-    val needReplay = dealloc.bits.replayInfo.needReplay()
-    val replayInst = dealloc.bits.uop.ctrl.replayInst
-
-    when (deallocValid && (needReplay || replayInst)) { 
-      allocated(deallocIndex) := false.B
-    }
-  }
+  val selectIndexOH = SelectFirstN(selectMask, LoadPipelineWidth, needEnqueue)
  
   //  LoadQueueRAW violation check
   //  Scheme 1(Current scheme): like old load queue.
@@ -271,6 +206,13 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
     val lqViolationSelVec = VecInit((0 until LoadQueueRAWSize).map(j => {
       addrMaskMatch(j) && entryNeedCheck(j)
     }))
+
+    (0 until LoadQueueRAWSize).map(j => {
+      when (allocated(j) && RegNext(io.storeIn(i).valid) && !RegNext(io.storeIn(i).bits.miss) && lqViolationSelVec(j)) {
+        allocated(j) := false.B
+      }
+    })
+
     val lqViolationSelUopExts = uop.map(op => {
       val opExt = Wire(new XSBundleWithMicroOp)
       opExt.uop := op
@@ -292,6 +234,7 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
 
     (lqViolation, lqViolationUop)
   } 
+
 
   // select rollback (part1) and generate rollback request
   // rollback check
@@ -337,19 +280,88 @@ class LoadQueueRAW(implicit p: Parameters) extends XSModule
 
   io.rollback.valid := VecInit(rollbackLqValid).asUInt.orR
 
-  // update mdp
-  io.correctTableUpdate.valid := rollbackLqValid.reduce(_|_)
-  io.correctTableUpdate.bits.addr := rollbackUop.cf.foldpc
-  io.correctTableUpdate.bits.strict := true.B
-  io.correctTableUpdate.bits.violation := true.B
+  io.violation.valid := io.rollback.valid
+  io.violation.bits.oraclePtr := rollbackUop.oraclePtr.value
+
+  val debug_vaddr = DelayN(VecInit(io.storeIn.map(_.bits.vaddr)), TotalSelectCycles)
+  io.violation.bits.vaddr := debug_vaddr(rollbackUopExt.flag)
+
+  // <------- DANGEROUS: Don't change sequence here ! ------->
+
+  // Enqueue
+  for ((enq, w) <- io.query.map(_.req).zipWithIndex) {
+    paddrModule.io.wen(w) := false.B
+    maskModule.io.wen(w) := false.B
+
+    //  Allocate ready 
+    val allocateNums = if (w == 0) 0.U else PopCount(needEnqueue.take(w)) 
+    canAcceptVec(w) := freeNums > allocateNums
+
+    val enqIdx = OHToUInt(selectIndexOH(w))
+    enq.ready := Mux(needEnqueue(w), canAcceptVec(w), true.B)
+
+    when (needEnqueue(w) && canAcceptVec(w)) {
+
+      //  Allocate new entry
+      allocated(enqIdx) := true.B
+
+      //  Write paddr
+      paddrModule.io.wen(w) := true.B 
+      paddrModule.io.waddr(w) := enqIdx 
+      paddrModule.io.wdata(w) := enq.bits.paddr
+
+      //  Write mask
+      maskModule.io.wen(w) := true.B 
+      maskModule.io.waddr(w) := enqIdx 
+      maskModule.io.wdata(w) := enq.bits.mask
+
+      //  Fill info 
+      uop(enqIdx) := enq.bits.uop
+      datavalid(enqIdx) := enq.bits.datavalid
+    }
+  }
+
+  for ((query, w) <- io.query.map(_.resp).zipWithIndex) {
+    query.valid := RegNext(io.query(w).req.valid)
+    query.bits.replayFromFetch := RegNext(false.B)
+  }
+
+
+  //  LoadQueueRAW deallocate
+  for (i <- 0 until LoadQueueRAWSize) {
+    val deqNotBlock = Mux(!allAddrCheck, !isBefore(io.stAddrReadySqPtr, uop(i).sqIdx), true.B)
+    val needCancel = uop(i).robIdx.needFlush(io.redirect)
+
+    when (allocated(i) && (deqNotBlock || needCancel)) {
+      allocated(i) := false.B
+    }
+  }
+
+  // if need replay deallocate entry
+  val lastCanAccept = RegNext(VecInit(needEnqueue.zip(canAcceptVec).map(x => x._1 && x._2)))
+  val lastAllocIndex = RegNext(VecInit(selectIndexOH.map(x => OHToUInt(x))))
+  for ((dealloc, i) <- io.deallocate.zipWithIndex) {
+    val deallocValid = dealloc.valid && lastCanAccept(i)
+    val deallocIndex = lastAllocIndex(i)
+    val needReplay = dealloc.bits.replayInfo.needReplay()
+    val replayInst = dealloc.bits.uop.ctrl.replayInst
+
+    when (deallocValid && (needReplay || replayInst)) { 
+      allocated(deallocIndex) := false.B
+    }
+  }
+
+  // perf cnt
+  val full = freeNums === 0.U
+  io.lqFull := full
 
   XSPerfAccumulate("enqs", PopCount(io.query.map(_.req.fire)))
-  XSPerfAccumulate("full", freeNums === 0.U)
+  XSPerfAccumulate("full", full)
   XSPerfAccumulate("rollback", io.rollback.valid) 
   val perfEvents: Seq[(String, UInt)] = Seq(
-    ("enqs", PopCount(io.query.map(_.req.fire))),
-    ("full", freeNums === 0.U),
-    ("rollback         ", io.rollback.valid),
+    ("enq ", PopCount(io.query.map(_.req.fire))),
+    ("full ", full),
+    ("rollback", io.rollback.valid),
   )
   generatePerfEvent()   
   // end

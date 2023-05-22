@@ -22,6 +22,7 @@ import xiangshan.backend.rob.RobPtr
 import xiangshan.backend.CtrlToFtqIO
 import xiangshan.backend.decode.{ImmUnion, XDecode}
 import xiangshan.mem.{LqPtr, SqPtr}
+import xiangshan.mem.mdp._
 import xiangshan.frontend.PreDecodeInfo
 import xiangshan.frontend.HasBPUParameter
 import xiangshan.frontend.{AllFoldedHistories, CircularGlobalHistory, GlobalHistory, ShiftingGlobalHistory}
@@ -57,12 +58,12 @@ object ValidUndirectioned {
 }
 
 object RSFeedbackType {
-  val tlbMiss = 0.U(3.W)
-  val mshrFull = 1.U(3.W)
-  val dataInvalid = 2.U(3.W)
-  val bankConflict = 3.U(3.W)
-  val ldVioCheckRedo = 4.U(3.W)
-
+  val lrqFull = 0.U(3.W)
+  val tlbMiss = 1.U(3.W)
+  val mshrFull = 2.U(3.W)
+  val dataInvalid = 3.U(3.W)
+  val bankConflict = 4.U(3.W)
+  val ldVioCheckRedo = 5.U(3.W)
   val feedbackInvalid = 7.U(3.W)
 
   def apply() = UInt(3.W)
@@ -130,6 +131,7 @@ class CtrlFlow(implicit p: Parameters) extends XSBundle {
   val ssid = UInt(SSIDWidth.W)
   val ftqPtr = new FtqPtr
   val ftqOffset = UInt(log2Up(PredictWidth).W)
+
 }
 
 
@@ -220,6 +222,7 @@ class PerfDebugInfo(implicit p: Parameters) extends XSBundle {
 class LSIdx(implicit p: Parameters) extends XSBundle {
   val lqIdx = new LqPtr
   val sqIdx = new SqPtr
+  val oraclePtr = new MdpPtr
 }
 
 // CfCtrl -> MicroOp at Rename Stage
@@ -231,6 +234,7 @@ class MicroOp(implicit p: Parameters) extends CfCtrl {
   val robIdx = new RobPtr
   val lqIdx = new LqPtr
   val sqIdx = new SqPtr
+  val oraclePtr = new MdpPtr // oracle mdp pointer
   val eliminatedMove = Bool()
   val debugInfo = new PerfDebugInfo
   def needRfRPort(index: Int, isFp: Boolean, ignoreState: Boolean = true) : Bool = {

@@ -27,6 +27,7 @@ import xiangshan.cache.{DCacheWordIO, DCacheLineIO, MemoryOpConstants}
 import xiangshan.backend.rob.{RobLsqIO, RobPtr}
 import difftest._
 import device.RAMHelper
+import xiangshan.mem.mdp._
 
 class SqPtr(implicit p: Parameters) extends CircularQueuePtr[SqPtr](
   p => p(XSCoreParamsKey).StoreQueueSize
@@ -48,6 +49,7 @@ class SqEnqIO(implicit p: Parameters) extends XSBundle {
   val needAlloc = Vec(exuParameters.LsExuCnt, Input(Bool()))
   val req = Vec(exuParameters.LsExuCnt, Flipped(ValidIO(new MicroOp)))
   val resp = Vec(exuParameters.LsExuCnt, Output(new SqPtr))
+  val oraclePtr = Vec(exuParameters.LsExuCnt, Output(new MdpPtr))
 }
 
 class DataBufferEntry (implicit p: Parameters)  extends DCacheBundle {
@@ -85,6 +87,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
     val stDataReadyVec = Output(Vec(StoreQueueSize, Bool()))
     val stIssuePtr = Output(new SqPtr)
     val sqDeqPtr = Output(new SqPtr)
+    val sqEnqPtr = Output(new SqPtr)
     val sqFull = Output(Bool())
     val sqCancelCnt = Output(UInt(log2Up(StoreQueueSize + 1).W))
     val sqDeq = Output(UInt(log2Ceil(EnsbufferWidth + 1).W))
@@ -141,6 +144,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
   val addrReadyPtrExt = RegInit(0.U.asTypeOf(new SqPtr))
   val dataReadyPtrExt = RegInit(0.U.asTypeOf(new SqPtr))
   val validCounter = RegInit(0.U(log2Ceil(LoadQueueFlagSize + 1).W))
+  val oraclePtrExt = RegInit(VecInit((0 until io.enq.req.length).map(_.U.asTypeOf(new MdpPtr))))
 
   val enqPtr = enqPtrExt(0).value
   val deqPtr = deqPtrExt(0).value
@@ -184,6 +188,9 @@ class StoreQueue(implicit p: Parameters) extends XSModule
       deqPtrExt
     )
   )
+  
+  io.sqDeqPtr := deqPtrExt(0)
+  io.sqEnqPtr := enqPtrExt(0)
   io.sqDeq := RegNext(Mux(RegNext(io.sbuffer(1).fire()), 2.U,
     Mux(RegNext(io.sbuffer(0).fire()) || io.mmioStout.fire(), 1.U, 0.U)
   ))
@@ -209,6 +216,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
   for (i <- 0 until io.enq.req.length) {
     val offset = if (i == 0) 0.U else PopCount(io.enq.needAlloc.take(i))
     val sqIdx = enqPtrExt(offset)
+    val oraclePtr = oraclePtrExt(offset)
     val index = io.enq.req(i).bits.sqIdx.value
     when (canEnqueue(i) && !enqCancel(i)) {
       uop(index) := io.enq.req(i).bits
@@ -225,6 +233,7 @@ class StoreQueue(implicit p: Parameters) extends XSModule
       XSError(index =/= sqIdx.value, s"must be the same entry $i\n")
     }
     io.enq.resp(i) := sqIdx
+    io.enq.oraclePtr(i) := oraclePtr
   }
   XSDebug(p"(ready, valid): ${io.enq.canAccept}, ${Binary(Cat(io.enq.req.map(_.valid)))}\n")
 
@@ -274,7 +283,8 @@ class StoreQueue(implicit p: Parameters) extends XSModule
 
   io.stDataReadySqPtr := dataReadyPtrExt
   io.stIssuePtr := enqPtrExt(0)
-  io.sqDeqPtr := deqPtrExt(0)
+
+
 
   /**
     * Writeback store from store units
@@ -407,8 +417,14 @@ class StoreQueue(implicit p: Parameters) extends XSModule
     // all addrvalid terms need to be checked
     val addrValidVec = WireInit(VecInit((0 until StoreQueueSize).map(i => addrvalid(i) && allocated(i))))
     val dataValidVec = WireInit(VecInit((0 until StoreQueueSize).map(i => datavalid(i))))
-    val robMatchVec = RegNext(VecInit((0 until StoreQueueSize).map(j => allocated(j) && uop(j).robIdx === io.forward(i).uop.cf.waitForRobIdx)))
-    val allValidVec = WireInit(VecInit((0 until StoreQueueSize).map(i => addrvalid(i) && datavalid(i) && allocated(i))))
+    val allValidVec  = WireInit(VecInit((0 until StoreQueueSize).map(i => addrvalid(i) && datavalid(i) && allocated(i))))
+
+    val mdpMatchVec = 
+      if (LFSTEnable) {
+        WireInit(VecInit((0 until StoreQueueSize).map(j => io.forward(i).uop.cf.loadWaitBit && uop(j).robIdx === io.forward(i).uop.cf.waitForRobIdx)))
+      } else {
+        WireInit(VecInit((0 until StoreQueueSize).map(j => uop(j).cf.storeSetHit && uop(j).cf.ssid === io.forward(i).uop.cf.ssid)))
+      }
 
     val forwardMask1 = Mux(differentFlag, ~deqMask, deqMask ^ forwardMask)
     val forwardMask2 = Mux(differentFlag, forwardMask, 0.U(StoreQueueSize.W))
@@ -485,8 +501,11 @@ class StoreQueue(implicit p: Parameters) extends XSModule
     val s2_deqPtrExt = RegNext(deqPtrExt(0))
 
     // addr invalid sq index
-    val (addrInvalidSqIdx, robMatchFlag) = PriorityEncoderWithFlag(robMatchVec.asUInt) 
-    when (robMatchFlag) {
+    // make chisel happy
+    val addrInvalidMask = Wire(UInt(StoreQueueSize.W))
+    addrInvalidMask := RegNext(needForward) & RegNext(~addrValidVec.asUInt) & RegNext(mdpMatchVec.asUInt)
+    val (addrInvalidSqIdx, mdpMatchFlag) = PriorityEncoderWithFlag(addrInvalidMask) 
+    when (mdpMatchFlag) {
       io.forward(i).addrInvalidSqIdx.flag := Mux(!s2_differentFlag || addrInvalidSqIdx >= s2_deqPtrExt.value, s2_deqPtrExt.flag, s2_enqPtrExt.flag)
       io.forward(i).addrInvalidSqIdx.value := addrInvalidSqIdx
     } .otherwise {
@@ -511,20 +530,8 @@ class StoreQueue(implicit p: Parameters) extends XSModule
       // mayby store inst has been written to sbuffer already.
       io.forward(i).dataInvalidSqIdx := RegNext(io.forward(i).uop.sqIdx)
     }
-    
-    // check whether false dependency
-    io.forward(i).storeSetHit := (
-      (RegNext(paddrModule.io.forwardMmask(i).asUInt) & RegNext(vaddrModule.io.forwardMmask(i).asUInt)) & 
-      RegNext(needForward) &
-      RegNext(addrValidVec.asUInt) & 
-      robMatchVec.asUInt
-    ) =/= 0.U
-
-    io.forward(i).addrInvalid := (
-      RegNext(needForward) & RegNext(addrValidVec.asUInt) & robMatchVec.asUInt
-    ) === 0.U
-
-    io.forward(i).issued := !robMatchVec.asUInt.orR
+    io.forward(i).addrInvalid := addrInvalidMask =/= 0.U
+    io.forward(i).issued := !(RegNext(needForward) & RegNext(mdpMatchVec.asUInt)).orR
   }
 
   /**
@@ -750,8 +757,10 @@ class StoreQueue(implicit p: Parameters) extends XSModule
   when (lastCycleRedirect) {
     // we recover the pointers in the next cycle after redirect
     enqPtrExt := VecInit(enqPtrExt.map(_ - (lastCycleCancelCount + lastEnqCancel)))
+    oraclePtrExt := VecInit(oraclePtrExt.map(_ - (lastCycleCancelCount + lastEnqCancel)))
   }.otherwise {
     enqPtrExt := VecInit(enqPtrExt.map(_ + enqNumber))
+    oraclePtrExt := VecInit(oraclePtrExt.map(_ + enqNumber))
   }
 
   deqPtrExt := deqPtrExtNext

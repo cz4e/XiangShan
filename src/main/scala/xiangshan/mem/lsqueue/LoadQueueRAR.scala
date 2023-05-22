@@ -37,6 +37,7 @@ class LoadQueueRAR(implicit p: Parameters) extends XSModule
     val deallocate = Vec(LoadPipelineWidth, Flipped(Valid(new LqWriteBundle)))
     val release = Flipped(Valid(new Release))
     val ldIssuePtr = Input(new LqPtr)
+    val lqFull = Output(Bool())
   })
   println("LoadQueueRAR: size: " + LoadQueueRARSize)
   //  LoadQueueRAR field
@@ -81,9 +82,7 @@ class LoadQueueRAR(implicit p: Parameters) extends XSModule
 
   // select LoadPipelineWidth valid index.
   val selectMask = ~allocated.asUInt
-  val select0IndexOH = PriorityEncoderOH(selectMask)
-  val select1IndexOH = Reverse(PriorityEncoderOH(Reverse(selectMask)))
-  val selectIndexOH = VecInit(Seq(select0IndexOH, select1IndexOH))
+  val selectIndexOH = SelectFirstN(selectMask, LoadPipelineWidth, needEnqueue)
 
   for ((enq, w) <- io.query.map(_.req).zipWithIndex) {
     paddrModule.io.wen(w) := false.B
@@ -184,6 +183,8 @@ class LoadQueueRAR(implicit p: Parameters) extends XSModule
   // perf cnt
   val canEnqCount = PopCount(io.query.map(_.req.fire))
   val full = freeNums === 0.U
+  io.lqFull := full
+
   val ldLdViolationCount = PopCount(io.query.map(_.resp).map(resp => resp.valid && resp.bits.replayFromFetch))
   XSPerfAccumulate("enq", canEnqCount)
   XSPerfAccumulate("full", full)

@@ -187,13 +187,10 @@ class LoadForwardQueryIO(implicit p: Parameters) extends XSBundleWithMicroOp {
   // should be raised to flush SQ and committed sbuffer.
   val matchInvalid = Input(Bool()) // resp to load_s2
 
-  // rob index match, but address invalid.
+  // ssid index match, but address invalid.
   val addrInvalid = Input(Bool())
 
-  // mdp strict dependency
-  val storeSetHit = Input(Bool())
-
-  // rob index match fail.
+  // ssid index match fail.
   val issued = Input(Bool())
 }
 

@@ -110,6 +110,7 @@ class Rename(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHe
     uop.debugInfo := DontCare
     uop.lqIdx := DontCare
     uop.sqIdx := DontCare
+    uop.oraclePtr := DontCare
   })
 
   require(RenameWidth >= CommitWidth)

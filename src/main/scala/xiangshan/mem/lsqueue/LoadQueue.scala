@@ -121,7 +121,6 @@ class LoadQueue(implicit p: Parameters) extends XSModule
     val refill = Flipped(ValidIO(new Refill)) 
     val release = Flipped(Valid(new Release))
     val rollback = Output(Valid(new Redirect)) 
-    val correctTableUpdate = Valid(new CorrectTableUpdate) 
     val rob = Flipped(new RobLsqIO)
     val uncache = new UncacheWordIO
     val trigger = Vec(LoadPipelineWidth, new LqTriggerIO)
@@ -132,6 +131,7 @@ class LoadQueue(implicit p: Parameters) extends XSModule
     val lqReplayFull = Output(Bool())
     val lqReplayCanAccept = Output(Vec(LoadPipelineWidth, Bool()))
     val tlbReplayDelayCycleCtrl = Vec(4, Input(UInt(ReSelectLen.W))) 
+    val violation = Valid(new OracleMDPViolation)
   })
 
   val loadQueueRAR = Module(new LoadQueueRAR)  //  ld-ld violation
@@ -154,15 +154,13 @@ class LoadQueue(implicit p: Parameters) extends XSModule
   loadQueueRAW.io.redirect <> io.redirect 
   loadQueueRAW.io.rollback <> io.rollback
   loadQueueRAW.io.storeIn <> io.sta.s1.storeAddrIn
-  loadQueueRAW.io.correctTableUpdate <> io.correctTableUpdate
   loadQueueRAW.io.stAddrReadySqPtr <> io.sq.stAddrReadySqPtr
   loadQueueRAW.io.stIssuePtr <> io.sq.stIssuePtr
   loadQueueRAW.io.ldIssuePtr := loadQueueFlag.io.ldIssuePtr
-  loadQueueRAW.io.lqEmpty := loadQueueFlag.io.lqEmpty
   loadQueueRAW.io.sqEmpty <> io.sq.sqEmpty
   loadQueueRAW.io.query <> io.ldu.s2.storeLoadViolationQuery  // enqueue
   loadQueueRAW.io.deallocate <> io.ldu.s3.loadIn
-  
+  loadQueueRAW.io.violation <> io.violation
   /**
    * LoadQueueFlag
    */  
@@ -198,8 +196,28 @@ class LoadQueue(implicit p: Parameters) extends XSModule
   loadQueueReplay.io.tlbReplayDelayCycleCtrl <> io.tlbReplayDelayCycleCtrl
   loadQueueReplay.io.ldIssuePtr := loadQueueFlag.io.ldIssuePtr
 
+  val full_mask = Cat(loadQueueRAR.io.lqFull, loadQueueRAW.io.lqFull, loadQueueReplay.io.lqFull)
+  XSPerfAccumulate("full_mask_000", full_mask === 0.U)
+  XSPerfAccumulate("full_mask_001", full_mask === 1.U)
+  XSPerfAccumulate("full_mask_010", full_mask === 2.U)
+  XSPerfAccumulate("full_mask_011", full_mask === 3.U)
+  XSPerfAccumulate("full_mask_100", full_mask === 4.U)
+  XSPerfAccumulate("full_mask_101", full_mask === 5.U)
+  XSPerfAccumulate("full_mask_110", full_mask === 6.U)
+  XSPerfAccumulate("full_mask_111", full_mask === 7.U)
+
   // perf cnt
-  val perfEvents = Seq(loadQueueFlag, loadQueueRAR, loadQueueRAW, loadQueueReplay).flatMap(_.getPerfEvents)
+  val perfEvents = Seq(loadQueueFlag, loadQueueRAR, loadQueueRAW, loadQueueReplay).flatMap(_.getPerfEvents) ++ 
+  Seq(
+    ("full_mask_000", full_mask === 0.U),
+    ("full_mask_001", full_mask === 1.U),
+    ("full_mask_010", full_mask === 2.U),
+    ("full_mask_011", full_mask === 3.U),
+    ("full_mask_100", full_mask === 4.U),
+    ("full_mask_101", full_mask === 5.U),
+    ("full_mask_110", full_mask === 6.U),
+    ("full_mask_111", full_mask === 7.U),
+  )
   generatePerfEvent()
   // end
 }

@@ -326,6 +326,7 @@ class L2TLBImp(outer: L2TLB)(implicit p: Parameters) extends PtwModule(outer) wi
       difftest.io.index := i.U
       difftest.io.satp := io.csr.tlb.satp.ppn
       difftest.io.vpn := Cat(io.tlb(i).resp.bits.entry.tag, 0.U(sectortlbwidth.W))
+      difftest.io.ppn := DontCare
       for (j <- 0 until tlbcontiguous) {
         difftest.io.ppn(j) := Cat(io.tlb(i).resp.bits.entry.ppn, io.tlb(i).resp.bits.ppn_low(j))
         difftest.io.valididx(j) := io.tlb(i).resp.bits.valididx(j)

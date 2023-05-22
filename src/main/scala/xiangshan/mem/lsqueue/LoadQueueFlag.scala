@@ -499,12 +499,15 @@ class LoadQueueFlag(implicit p: Parameters) extends XSModule
   // just use one port
   io.loadOut(1).bits := DontCare
   io.loadOut(1).valid := false.B
+  io.loadOut(2).bits := DontCare
+  io.loadOut(2).valid := false.B
 
   io.ldRawDataOut(0).lqData := uncacheData
   io.ldRawDataOut(0).uop := io.loadOut(0).bits.uop 
   io.ldRawDataOut(0).addrOffset := paddrModule.io.rdata(0)
 
   io.ldRawDataOut(1) := DontCare
+  io.ldRawDataOut(2) := DontCare
 
   when (io.loadOut(0).fire) {
     writebacked(deqPtr) := true.B
@@ -516,6 +519,18 @@ class LoadQueueFlag(implicit p: Parameters) extends XSModule
       io.loadOut(0).bits.uop.cf.pc,
       true.B
     )    
+  }
+
+  if (env.EnableTopDown) {
+    val stall_loads_bound = WireDefault(0.B)
+    ExcitingUtils.addSink(stall_loads_bound, "stall_loads_bound", ExcitingUtils.Perf)
+    val have_miss_entry = (allocated zip datavalid).map(x => x._1 && !x._2).reduce(_ || _)
+    val l1d_loads_bound = stall_loads_bound && !have_miss_entry
+    ExcitingUtils.addSource(l1d_loads_bound, "l1d_loads_bound", ExcitingUtils.Perf)
+    XSPerfAccumulate("l1d_loads_bound", l1d_loads_bound)
+    val stall_l1d_load_miss = stall_loads_bound && have_miss_entry
+    ExcitingUtils.addSource(stall_l1d_load_miss, "stall_l1d_load_miss", ExcitingUtils.Perf)
+    ExcitingUtils.addSink(WireInit(0.U), "stall_l1d_load_miss", ExcitingUtils.Perf)
   }
 
   /**

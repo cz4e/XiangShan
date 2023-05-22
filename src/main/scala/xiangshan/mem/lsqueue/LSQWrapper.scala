@@ -91,7 +91,6 @@ class LsqWrapper(implicit p: Parameters) extends XSModule with HasDCacheParamete
     val forward = Vec(LoadPipelineWidth, Flipped(new PipeLoadForwardQueryIO))
     val rob = Flipped(new RobLsqIO)
     val rollback = Output(Valid(new Redirect))
-    val correctTableUpdate = Valid(new CorrectTableUpdate) 
     val release = Flipped(Valid(new Release))
     val refill = Flipped(Valid(new Refill))
     val uncacheOutstanding = Input(Bool())
@@ -109,6 +108,10 @@ class LsqWrapper(implicit p: Parameters) extends XSModule with HasDCacheParamete
     val exceptionAddr = new ExceptionAddrIO
     val trigger = Vec(LoadPipelineWidth, new LqTriggerIO)
     val issuePtrExt = Output(new SqPtr)
+    val sqDeqPtr = Output(new SqPtr)
+    val sqEnqPtr = Output(new SqPtr)
+    val violation = Valid(new OracleMDPViolation)
+    val stAddrReadyVec = Output(Vec(StoreQueueSize, Bool()))
   })
 
   val loadQueue = Module(new LoadQueue)
@@ -142,6 +145,7 @@ class LsqWrapper(implicit p: Parameters) extends XSModule with HasDCacheParamete
 
     io.enq.resp(i).lqIdx := loadQueue.io.enq.resp(i)
     io.enq.resp(i).sqIdx := storeQueue.io.enq.resp(i)
+    io.enq.resp(i).oraclePtr := storeQueue.io.enq.oraclePtr(i)
   }
 
   // store queue wiring
@@ -160,7 +164,9 @@ class LsqWrapper(implicit p: Parameters) extends XSModule with HasDCacheParamete
   storeQueue.io.sqFull <> io.sqFull
   storeQueue.io.forward <> io.forward // overlap forwardMask & forwardData, DO NOT CHANGE SEQUENCE
   storeQueue.io.sqEmpty <> io.sqEmpty
-
+  storeQueue.io.sqDeqPtr <> io.sqDeqPtr
+  storeQueue.io.sqEnqPtr <> io.sqEnqPtr
+  storeQueue.io.stAddrReadyVec <> io.stAddrReadyVec
   // <------- DANGEROUS: Don't change sequence here ! ------->
 
   //  load queue wiring
@@ -170,7 +176,6 @@ class LsqWrapper(implicit p: Parameters) extends XSModule with HasDCacheParamete
   loadQueue.io.ldRawDataOut <> io.ldRawDataOut
   loadQueue.io.rob <> io.rob
   loadQueue.io.rollback <> io.rollback
-  loadQueue.io.correctTableUpdate <> io.correctTableUpdate
   loadQueue.io.replay <> io.replay
   loadQueue.io.refill <> io.refill
   loadQueue.io.release <> io.release
@@ -182,13 +187,14 @@ class LsqWrapper(implicit p: Parameters) extends XSModule with HasDCacheParamete
   loadQueue.io.sq.stDataReadySqPtr <> storeQueue.io.stDataReadySqPtr
   loadQueue.io.sq.stDataReadyVec <> storeQueue.io.stDataReadyVec
   loadQueue.io.sq.stIssuePtr <> storeQueue.io.stIssuePtr
-  loadQueue.io.sq.sqEmpty := storeQueue.io.sqEmpty
+  loadQueue.io.sq.sqEmpty <> storeQueue.io.sqEmpty
   loadQueue.io.sta.s1.storeAddrIn <> io.sta.s1.storeAddrIn
   loadQueue.io.std.s0.storeDataIn <> io.std.s0.storeDataIn
   loadQueue.io.lqFlagFull <> io.lqFull
   loadQueue.io.lqReplayFull <> io.lqReplayFull
   loadQueue.io.lqReplayCanAccept <> io.lqReplayCanAccept
   loadQueue.io.lqDeq <> io.lqDeq
+  loadQueue.io.violation <> io.violation
 
   // rob commits for lsq is delayed for two cycles, which causes the delayed update for deqPtr in lq/sq
   // s0: commit
@@ -276,6 +282,7 @@ class LsqEnqCtrl(implicit p: Parameters) extends XSModule {
 
   val loadEnqNumber = PopCount(io.enq.req.zip(io.enq.needAlloc).map(x => x._1.valid && x._2(0)))
   val storeEnqNumber = PopCount(io.enq.req.zip(io.enq.needAlloc).map(x => x._1.valid && x._2(1)))
+  val oraclePtr = RegInit(0.U.asTypeOf(new MdpPtr))
 
   // How to update ptr and counter:
   // (1) by default, updated according to enq/commit
@@ -291,11 +298,15 @@ class LsqEnqCtrl(implicit p: Parameters) extends XSModule {
     lqCounter := lqCounter + io.lcommit + t3_lqCancelCnt
     sqPtr := sqPtr - t3_sqCancelCnt
     sqCounter := sqCounter + io.scommit + t3_sqCancelCnt
+
+    oraclePtr := oraclePtr - t3_sqCancelCnt
   }.elsewhen (!io.redirect.valid && io.enq.canAccept) {
     lqPtr := lqPtr + loadEnqNumber
     lqCounter := lqCounter + io.lcommit - loadEnqNumber
     sqPtr := sqPtr + storeEnqNumber
     sqCounter := sqCounter + io.scommit - storeEnqNumber
+
+    oraclePtr := oraclePtr + storeEnqNumber
   }.otherwise {
     lqCounter := lqCounter + io.lcommit
     sqCounter := sqCounter + io.scommit
@@ -318,6 +329,8 @@ class LsqEnqCtrl(implicit p: Parameters) extends XSModule {
     resp.lqIdx := lqPtr + lqOffset(i)
     sqOffset(i) := PopCount(io.enq.needAlloc.take(i).map(a => a(1)))
     resp.sqIdx := sqPtr + sqOffset(i)
+    
+    resp.oraclePtr := (oraclePtr + sqOffset(i))
   }
 
   io.enqLsq.needAlloc := RegNext(io.enq.needAlloc)
@@ -327,6 +340,7 @@ class LsqEnqCtrl(implicit p: Parameters) extends XSModule {
     toLsq.bits := RegEnable(enq.bits, do_enq)
     toLsq.bits.lqIdx := RegEnable(resp.lqIdx, do_enq)
     toLsq.bits.sqIdx := RegEnable(resp.sqIdx, do_enq)
+    toLsq.bits.oraclePtr := RegEnable(resp.oraclePtr, do_enq)
   }
 
 }

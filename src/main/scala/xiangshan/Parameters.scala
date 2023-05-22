@@ -133,11 +133,14 @@ case class XSCoreParameters
   LoadQueueRARSize: Int = 80,
   LoadQueueRAWSize: Int = 64, // NOTE: make sure that LoadQueueRAWSize is power of 2.
   RollbackGroupSize: Int = 8,
-  LoadQueueReplaySize: Int = 80,
+  LoadQueueReplaySize: Int = 96,
   LoadQueueNWriteBanks: Int = 8, // NOTE: make sure that LoadQueueRARSize/LoadQueueRAWSize is divided by LoadQueueNWriteBanks
+  OracleMDPSize: Int = 50000000,
   StoreQueueSize: Int = 64,
   StoreQueueNWriteBanks: Int = 8, // NOTE: make sure that StoreQueueSize is divided by StoreQueueNWriteBanks
   StoreQueueForwardWithMask: Boolean = true,
+  StoreWaitCyclePow2: Int = 4,
+  StoreHasHigherPriority: Boolean = false,
   VlsQueueSize: Int = 8,
   RobSize: Int = 256,
   dpParams: DispatchParameters = DispatchParameters(
@@ -156,12 +159,12 @@ case class XSCoreParameters
     FmacCnt = 4,
     FmiscCnt = 2,
     FmiscDivSqrtCnt = 0,
-    LduCnt = 2,
-    StuCnt = 2
+    LduCnt = 3,
+    StuCnt = 3
   ),
   prefetcher: Option[PrefetcherParams] = Some(SMSParams()),
-  LoadPipelineWidth: Int = 2,
-  StorePipelineWidth: Int = 2,
+  LoadPipelineWidth: Int = 3,
+  StorePipelineWidth: Int = 3,
   VecMemSrcInWidth: Int = 2,
   VecMemInstWbWidth: Int = 1,
   VecMemDispatchWidth: Int = 1,
@@ -169,7 +172,7 @@ case class XSCoreParameters
   StoreBufferThreshold: Int = 7,
   EnsbufferWidth: Int = 2,
   UncacheBufferSize: Int = 4,
-  EnableLoadToLoadForward: Boolean = true,
+  EnableLoadToLoadForward: Boolean = false,
   EnableFastForward: Boolean = false,
   EnableLdVioCheckAfterReset: Boolean = true,
   EnableSoftPrefetchAfterReset: Boolean = true,
@@ -404,6 +407,8 @@ trait HasXSParameter {
   val StoreQueueSize = coreParams.StoreQueueSize
   val StoreQueueNWriteBanks = coreParams.StoreQueueNWriteBanks
   val StoreQueueForwardWithMask = coreParams.StoreQueueForwardWithMask
+  val StoreWaitCyclePow2 = coreParams.StoreWaitCyclePow2
+  val StoreHasHigherPriority = coreParams.StoreHasHigherPriority
   val VlsQueueSize = coreParams.VlsQueueSize
   val dpParams = coreParams.dpParams
   val exuParameters = coreParams.exuParameters
@@ -442,8 +447,8 @@ trait HasXSParameter {
 
   val NumRs = (exuParameters.JmpCnt+1)/2 + (exuParameters.AluCnt+1)/2 + (exuParameters.MulCnt+1)/2 +
               (exuParameters.MduCnt+1)/2 + (exuParameters.FmacCnt+1)/2 +  + (exuParameters.FmiscCnt+1)/2 +
-              (exuParameters.FmiscDivSqrtCnt+1)/2 + (exuParameters.LduCnt+1)/2 +
-              (exuParameters.StuCnt+1)/2 + (exuParameters.StuCnt+1)/2
+              (exuParameters.FmiscDivSqrtCnt+1)/2 + (exuParameters.LduCnt)/2 +
+              (exuParameters.StuCnt)/2 + (exuParameters.StuCnt)/2
 
   val instBytes = if (HasCExtension) 2 else 4
   val instOffsetBits = log2Ceil(instBytes)
@@ -473,6 +478,7 @@ trait HasXSParameter {
   val SSIDWidth = log2Up(LFSTSize)
   val LFSTWidth = 4
   val StoreSetEnable = true // LWT will be disabled if SS is enabled
+  val LFSTEnable = false
 
   val loadExuConfigs = coreParams.loadExuConfigs
   val storeExuConfigs = coreParams.storeExuConfigs

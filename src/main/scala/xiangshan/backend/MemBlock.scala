@@ -143,7 +143,7 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
   val stdExeUnits = Seq.fill(exuParameters.StuCnt)(Module(new StdExeUnit))
   val stData = stdExeUnits.map(_.io.out)
   val exeUnits = loadUnits ++ storeUnits
-  val correctTable = Module(new CorrectTable)
+  val oracleMDP = Module(new OracleMDP)
   val l1_pf_req = Wire(Decoupled(new L1PrefetchReq()))
   val prefetcherOpt: Option[BasePrefecher] = coreParams.prefetcher.map {
     case _: SMSParams =>
@@ -172,7 +172,6 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
 
   loadUnits.zipWithIndex.map(x => x._1.suggestName("LoadUnit_"+x._2))
   storeUnits.zipWithIndex.map(x => x._1.suggestName("StoreUnit_"+x._2))
-  correctTable.io.csrCtrl := csrCtrl
   val atomicsUnit = Module(new AtomicsUnit)
 
   // Atom inst comes from sta / std, then its result
@@ -367,9 +366,6 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
     loadUnits(i).io.tlb <> dtlb_reqs.take(exuParameters.LduCnt)(i)
     // pmp
     loadUnits(i).io.pmp <> pmp_check(i).resp
-    // mdp
-    loadUnits(i).io.correctTableQuery <> correctTable.io.issue(i)
-    loadUnits(i).io.correctTableUpdate <> correctTable.io.update(i) 
     // st-ld violation query 
     for (s <- 0 until StorePipelineWidth) {
       loadUnits(i).io.reExecuteQuery(s) := storeUnits(s).io.reExecuteQuery
@@ -387,6 +383,11 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
       pf.io.ld_in(i).bits.uop.cf.pc := Mux(loadUnits(i).io.s2IsPointerChasing, io.loadPc(i), RegNext(io.loadPc(i)))
     })
 
+    // mdp oracle
+    loadUnits(i).io.sqDeqPtr := lsq.io.sqDeqPtr
+    loadUnits(i).io.sqEnqPtr := lsq.io.sqEnqPtr
+    loadUnits(i).io.oracleMDPQuery <> oracleMDP.io.query(i)
+
     // load to load fast forward: load(i) prefers data(i)
     val fastPriority = (i until exuParameters.LduCnt) ++ (0 until i)
     val fastValidVec = fastPriority.map(j => loadUnits(j).io.fastpathOut.valid)
@@ -399,7 +400,7 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
     loadUnits(i).io.loadFastImm := io.loadFastImm(i)
     loadUnits(i).io.replay <> lsq.io.replay(i)
     loadUnits(i).io.lqReplayCanAccept := lsq.io.lqReplayCanAccept(i)
-
+    loadUnits(i).io.stAddrReadyVec := lsq.io.stAddrReadyVec
     // passdown to lsq (load s2)
     lsq.io.ldu.s3.loadIn(i) <> loadUnits(i).io.lsq.loadIn
     lsq.io.loadOut(i) <> loadUnits(i).io.lsq.loadOut
@@ -469,7 +470,8 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
     stu.io.pmp          <> pmp_check(i+exuParameters.LduCnt).resp
 
     // store unit does not need fast feedback
-    io.rsfeedback(exuParameters.LduCnt + i).feedbackFast := DontCare
+    io.rsfeedback(exuParameters.LduCnt + i).feedbackFast.valid := false.B
+    io.rsfeedback(exuParameters.LduCnt + i).feedbackFast.bits := DontCare
 
     // Lsq to sta unit
     lsq.io.sta.s0.storeMaskIn(i) <> stu.io.storeMaskOut
@@ -543,8 +545,8 @@ class MemBlockImp(outer: MemBlock) extends LazyModuleImp(outer)
   lsq.io.rob            <> io.lsqio.rob
   lsq.io.enq            <> io.enqLsq
   lsq.io.brqRedirect    <> redirect
-  lsq.io.correctTableUpdate <> correctTable.io.update(LoadPipelineWidth)
   io.memoryViolation    <> lsq.io.rollback
+  lsq.io.violation <> oracleMDP.io.violation
   // lsq.io.uncache        <> uncache.io.lsq
   AddPipelineReg(lsq.io.uncache.req, uncache.io.lsq.req, false.B)
   AddPipelineReg(uncache.io.lsq.resp, lsq.io.uncache.resp, false.B)

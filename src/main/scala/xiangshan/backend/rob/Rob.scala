@@ -259,7 +259,6 @@ class ExceptionGen(implicit p: Parameters) extends XSModule with HasCircularQueu
 
   def getOldest(valid: Seq[Bool], bits: Seq[RobExceptionInfo]): (Seq[Bool], Seq[RobExceptionInfo]) = {
     assert(valid.length == bits.length)
-    assert(isPow2(valid.length))
     if (valid.length == 1) {
       (valid, bits)
     } else if (valid.length == 2) {
@@ -272,7 +271,7 @@ class ExceptionGen(implicit p: Parameters) extends XSModule with HasCircularQueu
       (Seq(oldest.valid), Seq(oldest.bits))
     } else {
       val left = getOldest(valid.take(valid.length / 2), bits.take(valid.length / 2))
-      val right = getOldest(valid.takeRight(valid.length / 2), bits.takeRight(valid.length / 2))
+      val right = getOldest(valid.takeRight(valid.length - (valid.length / 2)), bits.takeRight(valid.length - (valid.length / 2)))
       getOldest(left._1 ++ right._1, left._2 ++ right._2)
     }
   }
@@ -566,6 +565,7 @@ class RobImp(outer: Rob)(implicit p: Parameters) extends LazyModuleImp(outer)
       // debug for lqidx and sqidx
       debug_microOp(wbIdx).lqIdx := wb.bits.uop.lqIdx
       debug_microOp(wbIdx).sqIdx := wb.bits.uop.sqIdx
+      debug_microOp(wbIdx).oraclePtr := wb.bits.uop.oraclePtr
 
       val debug_Uop = debug_microOp(wbIdx)
       XSInfo(true.B,

@@ -77,14 +77,16 @@ class XSTop()(implicit p: Parameters) extends BaseXSSoc() with HasSoCParameter
     core_with_l2(i).clint_int_sink := misc.clint.intnode
     core_with_l2(i).plic_int_sink :*= misc.plic.intnode
     core_with_l2(i).debug_int_sink := misc.debugModule.debug.dmOuter.dmOuter.intnode
-    misc.plic.intnode := IntBuffer() := core_with_l2(i).beu_int_source
+    // misc.plic.intnode := IntBuffer() := core_with_l2(i).beu_int_source
+    misc.plic.intnode := core_with_l2(i).beu_int_source
     misc.peripheral_ports(i) := core_with_l2(i).uncache
     misc.core_to_l3_ports(i) :=* core_with_l2(i).memory_port
   }
 
   l3cacheOpt.map(_.ctlnode.map(_ := misc.peripheralXbar))
   l3cacheOpt.map(_.intnode.map(int => {
-    misc.plic.intnode := IntBuffer() := int
+    // misc.plic.intnode := IntBuffer() := int
+    misc.plic.intnode := int
   }))
 
   val core_rst_nodes = if(l3cacheOpt.nonEmpty && l3cacheOpt.get.rst_nodes.nonEmpty){
