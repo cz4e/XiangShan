@@ -102,7 +102,8 @@ class MinimalConfig(n: Int = 1) extends Config(
           nReleaseEntries = 1,
           nProbeEntries = 2,
           nPrefetchEntries = 2,
-          hasPrefetch = false
+          nPrefBufferEntries = 32,
+          hasPrefetch = true
         ),
         dcacheParametersOpt = Some(DCacheParameters(
           nSets = 64, // 32KB DCache
@@ -258,7 +259,7 @@ class WithNKBL2
           blockGranularity = log2Ceil(2 * p.dcacheParametersOpt.get.nSets / banks),
           aliasBitsOpt = p.dcacheParametersOpt.get.aliasBitsOpt
         )),
-        reqField = Seq(PreferCacheField()),
+        reqField = Seq(PreferCacheField(), ReqSourceField()),
         echoField = Seq(DirtyField()),
         prefetch = Some(huancun.prefetch.PrefetchReceiverParams()),
         enablePerf = true,

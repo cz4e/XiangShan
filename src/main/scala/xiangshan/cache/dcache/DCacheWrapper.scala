@@ -27,7 +27,7 @@ import freechips.rocketchip.diplomacy.{IdRange, LazyModule, LazyModuleImp, Trans
 import freechips.rocketchip.tilelink._
 import freechips.rocketchip.util.{BundleFieldBase, UIntToOH1}
 import device.RAMHelper
-import huancun.{AliasField, AliasKey, DirtyField, PreferCacheField, PrefetchField}
+import huancun.{AliasField, AliasKey, DirtyField, PreferCacheField, PrefetchField, ReqSourceField}
 import utility.FastArbiter
 import mem.{AddPipelineReg}
 import xiangshan.cache.dcache.ReplayCarry
@@ -59,7 +59,8 @@ case class DCacheParameters
   val aliasBitsOpt = if(setBytes > pageSize) Some(log2Ceil(setBytes / pageSize)) else None
   val reqFields: Seq[BundleFieldBase] = Seq(
     PrefetchField(),
-    PreferCacheField()
+    PreferCacheField(),
+    ReqSourceField()
   ) ++ aliasBitsOpt.map(AliasField)
   val echoFields: Seq[BundleFieldBase] = Seq(DirtyField())
 
@@ -299,10 +300,10 @@ class DCacheExtraMeta(implicit p: Parameters) extends DCacheBundle
 }
 
 // memory request in word granularity(load, mmio, lr/sc, atomics)
-class DCacheWordReq(implicit p: Parameters)  extends DCacheBundle
+class DCacheWordReq(implicit p: Parameters) extends DCacheBundle
 {
   val cmd    = UInt(M_SZ.W)
-  val addr   = UInt(PAddrBits.W)
+  val vaddr  = UInt(VAddrBits.W)
   val data   = UInt(DataBits.W)
   val mask   = UInt((DataBits/8).W)
   val id     = UInt(reqIdWidth.W)
@@ -312,8 +313,8 @@ class DCacheWordReq(implicit p: Parameters)  extends DCacheBundle
 
   val debug_robIdx = UInt(log2Ceil(RobSize).W)
   def dump() = {
-    XSDebug("DCacheWordReq: cmd: %x addr: %x data: %x mask: %x id: %d\n",
-      cmd, addr, data, mask, id)
+    XSDebug("DCacheWordReq: cmd: %x vaddr: %x data: %x mask: %x id: %d\n",
+      cmd, vaddr, data, mask, id)
   }
 }
 
@@ -334,7 +335,7 @@ class DCacheLineReq(implicit p: Parameters)  extends DCacheBundle
 }
 
 class DCacheWordReqWithVaddr(implicit p: Parameters) extends DCacheWordReq {
-  val vaddr = UInt(VAddrBits.W)
+  val addr = UInt(PAddrBits.W)
   val wline = Bool()
 }
 
@@ -697,7 +698,7 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
 
   //----------------------------------------
   // core data structures
-  val bankedDataArray = Module(new BankedDataArray)
+  val bankedDataArray = if(EnableDCacheWPU) Module(new SramedDataArray) else Module(new BankedDataArray)
   val metaArray = Module(new L1CohMetaArray(readPorts = LoadPipelineWidth + 1, writePorts = 2))
   val errorArray = Module(new L1FlagMetaArray(readPorts = LoadPipelineWidth + 1, writePorts = 2))
   val prefetchArray = Module(new L1FlagMetaArray(readPorts = LoadPipelineWidth + 1, writePorts = 2)) // prefetch flag array
@@ -1136,7 +1137,7 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
   ld_access.zip(ldu).foreach {
     case (a, u) =>
       a.valid := RegNext(u.io.lsu.req.fire()) && !u.io.lsu.s1_kill
-      a.bits.idx := RegNext(get_idx(u.io.lsu.req.bits.addr))
+      a.bits.idx := RegNext(get_idx(u.io.lsu.req.bits.vaddr))
       a.bits.tag := get_tag(u.io.lsu.s1_paddr_dup_dcache)
   }
   st_access.valid := RegNext(mainPipe.io.store_req.fire())

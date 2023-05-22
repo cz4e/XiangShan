@@ -114,6 +114,8 @@ class LoadUnit_S0(implicit p: Parameters) extends XSModule with HasDCacheParamet
   val s0_mask = Wire(UInt(8.W))
   val s0_uop = Wire(new MicroOp)
   val s0_isFirstIssue = Wire(Bool())
+  val s0_hasROBEntry = WireDefault(false.B)
+  val s0_rsIdx = Wire(UInt(log2Up(IssQueSize).W))
   val s0_sqIdx = Wire(new SqPtr)
   val s0_tryFastpath = WireInit(false.B)
   val s0_replayCarry = Wire(new ReplayCarry) // way info for way predict related logic
@@ -229,7 +231,7 @@ class LoadUnit_S0(implicit p: Parameters) extends XSModule with HasDCacheParamet
   }.otherwise {
     io.dcacheReq.bits.cmd  := MemoryOpConstants.M_XRD
   }
-  io.dcacheReq.bits.addr := s0_vaddr
+  io.dcacheReq.bits.vaddr := s0_vaddr
   io.dcacheReq.bits.mask := s0_mask
   io.dcacheReq.bits.data := DontCare
   io.dcacheReq.bits.isFirstIssue := s0_isFirstIssue
@@ -252,6 +254,7 @@ class LoadUnit_S0(implicit p: Parameters) extends XSModule with HasDCacheParamet
     s0_mask := genWmask(io.replay.bits.vaddr, io.replay.bits.uop.ctrl.fuOpType(1, 0))
     s0_uop := io.replay.bits.uop
     s0_isFirstIssue := io.replay.bits.isFirstIssue
+    s0_hasROBEntry := true.B
     s0_sqIdx := io.replay.bits.uop.sqIdx
     s0_replayCarry := io.replay.bits.replayCarry
     val replayUopIsPrefetch = WireInit(LSUOpType.isPrefetch(io.replay.bits.uop.ctrl.fuOpType))
@@ -276,6 +279,8 @@ class LoadUnit_S0(implicit p: Parameters) extends XSModule with HasDCacheParamet
     s0_mask := genWmask(s0_vaddr, io.in.bits.uop.ctrl.fuOpType(1,0))
     s0_uop := io.in.bits.uop
     s0_isFirstIssue := true.B
+    s0_hasROBEntry := true.B
+    s0_rsIdx := io.rsIdx
     s0_sqIdx := io.in.bits.uop.sqIdx
     val issueUopIsPrefetch = WireInit(LSUOpType.isPrefetch(io.in.bits.uop.ctrl.fuOpType))
     when (issueUopIsPrefetch) {
@@ -321,6 +326,7 @@ class LoadUnit_S0(implicit p: Parameters) extends XSModule with HasDCacheParamet
   io.out.bits.uop := s0_uop
   io.out.bits.uop.cf.exceptionVec(loadAddrMisaligned) := !addrAligned
   io.out.bits.isFirstIssue := s0_isFirstIssue
+  io.out.bits.hasROBEntry := s0_hasROBEntry
   io.out.bits.isPrefetch := isPrefetch
   io.out.bits.isHWPrefetch := isHWPrefetch
   io.out.bits.isLoadReplay := lfsrc_loadReplay_select

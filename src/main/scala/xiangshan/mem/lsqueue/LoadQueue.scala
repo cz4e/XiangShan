@@ -78,7 +78,6 @@ class LqTriggerIO(implicit p: Parameters) extends XSBundle {
   val lqLoadAddrTriggerHitVec = Output(Vec(3, Bool()))
 }
 
-
 class LoadQueue(implicit p: Parameters) extends XSModule 
   with HasDCacheParameters
   with HasCircularQueuePtrHelper
@@ -95,11 +94,6 @@ class LoadQueue(implicit p: Parameters) extends XSModule
       }
       val s3 = new Bundle() {
         val loadIn = Vec(StorePipelineWidth, Flipped(Valid(new LqWriteBundle)))
-      }
-    }
-    val sta = new Bundle() {
-      val s1 = new Bundle() {
-        val storeAddrIn = Vec(StorePipelineWidth, Flipped(Valid(new LsPipelineBundle)))
       }
     }
     val std = new Bundle() {
@@ -206,18 +200,17 @@ class LoadQueue(implicit p: Parameters) extends XSModule
   XSPerfAccumulate("full_mask_110", full_mask === 6.U)
   XSPerfAccumulate("full_mask_111", full_mask === 7.U)
 
-  // perf cnt
-  val perfEvents = Seq(loadQueueFlag, loadQueueRAR, loadQueueRAW, loadQueueReplay).flatMap(_.getPerfEvents) ++ 
-  Seq(
-    ("full_mask_000", full_mask === 0.U),
-    ("full_mask_001", full_mask === 1.U),
-    ("full_mask_010", full_mask === 2.U),
-    ("full_mask_011", full_mask === 3.U),
-    ("full_mask_100", full_mask === 4.U),
-    ("full_mask_101", full_mask === 5.U),
-    ("full_mask_110", full_mask === 6.U),
-    ("full_mask_111", full_mask === 7.U),
-  )
+  /**
+    * misc
+    */
+  // perf counter
+  XSPerfAccumulate("rollback", io.rollback.valid) // rollback redirect generated
+  XSPerfAccumulate("mmioCycle", uncacheState =/= s_idle) // lq is busy dealing with uncache req
+  XSPerfAccumulate("mmioCnt", io.uncache.req.fire())
+  XSPerfAccumulate("refill", io.refill.valid)
+  XSPerfAccumulate("writeback_success", PopCount(VecInit(io.ldout.map(i => i.fire()))))
+  XSPerfAccumulate("writeback_blocked", PopCount(VecInit(io.ldout.map(i => i.valid && !i.ready))))
+  XSPerfAccumulate("utilization_miss", PopCount((0 until LoadQueueSize).map(i => allocated(i) && miss(i))))
   generatePerfEvent()
   // end
 }
