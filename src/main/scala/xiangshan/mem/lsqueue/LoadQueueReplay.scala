@@ -574,6 +574,55 @@ class LoadQueueReplay(implicit p: Parameters) extends XSModule
 
   io.lqFull := lqFull
 
+   // top down 
+
+  val sourceVaddr = WireInit(0.U.asTypeOf(new Valid(UInt(VAddrBits.W))))
+
+  ExcitingUtils.addSink(sourceVaddr, s"rob_head_vaddr_${coreParams.HartId}", ExcitingUtils.Perf)
+
+  val uop_wrapper = Wire(Vec(LoadQueueReplaySize, new XSBundleWithMicroOp))
+  (uop_wrapper.zipWithIndex).foreach {
+    case (u, i) => {
+      u.uop := uop(i)
+    }
+  }
+  val lq_match_vec = (debug_vaddr.zip(allocated)).map{case(va, alloc) => alloc && (va === sourceVaddr.bits)}
+  val rob_head_lq_match = ParallelOperation(lq_match_vec.zip(uop_wrapper), (a: Tuple2[Bool, XSBundleWithMicroOp], b: Tuple2[Bool, XSBundleWithMicroOp]) => {
+    val (a_v, a_uop) = (a._1, a._2)
+    val (b_v, b_uop) = (b._1, b._2)
+
+    val res = Mux(a_v && b_v, Mux(isAfter(a_uop.uop.robIdx, b_uop.uop.robIdx), b_uop, a_uop), 
+                  Mux(a_v, a_uop, 
+                      Mux(b_v, b_uop, 
+                                a_uop)))
+    (a_v || b_v, res)
+  })
+
+  val lq_match_bits = rob_head_lq_match._2.uop
+  val lq_match = rob_head_lq_match._1 && sourceVaddr.valid
+  val lq_match_idx = lq_match_bits.lqIdx.value
+
+  val rob_head_tlb_miss = lq_match && cause(lq_match_idx)(LoadReplayCauses.tlbMiss)
+  val rob_head_sched_error = lq_match && cause(lq_match_idx)(LoadReplayCauses.schedError)
+  val rob_head_wait_store = lq_match && cause(lq_match_idx)(LoadReplayCauses.waitStore)
+  val rob_head_confilct_replay = lq_match && cause(lq_match_idx)(LoadReplayCauses.bankConflict)
+  val rob_head_forward_fail = lq_match && cause(lq_match_idx)(LoadReplayCauses.forwardFail)
+  val rob_head_mshrfull_replay = lq_match && cause(lq_match_idx)(LoadReplayCauses.dcacheReplay)
+  val rob_head_dcache_miss = lq_match && cause(lq_match_idx)(LoadReplayCauses.dcacheMiss)
+  val rob_head_reject_enq = lq_match && cause(lq_match_idx)(LoadReplayCauses.rejectEnq)
+
+  val rob_head_vio_replay = rob_head_sched_error || rob_head_wait_store
+
+  val rob_head_miss_in_dtlb = WireInit(false.B)
+  ExcitingUtils.addSink(rob_head_miss_in_dtlb, s"miss_in_dtlb_${coreParams.HartId}", ExcitingUtils.Perf)
+  ExcitingUtils.addSource(rob_head_tlb_miss && !rob_head_miss_in_dtlb, s"load_tlb_replay_stall_${coreParams.HartId}", ExcitingUtils.Perf, true)
+  ExcitingUtils.addSource(rob_head_tlb_miss &&  rob_head_miss_in_dtlb, s"load_tlb_miss_stall_${coreParams.HartId}", ExcitingUtils.Perf, true)
+  ExcitingUtils.addSource(rob_head_vio_replay, s"load_vio_replay_stall_${coreParams.HartId}", ExcitingUtils.Perf, true)
+  ExcitingUtils.addSource(rob_head_mshrfull_replay, s"load_mshr_replay_stall_${coreParams.HartId}", ExcitingUtils.Perf, true)
+  ExcitingUtils.addSource(rob_head_confilct_replay, s"load_l1_cache_stall_with_bank_conflict_${coreParams.HartId}", ExcitingUtils.Perf, true)
+
+  val perfValidCount = RegNext(PopCount(allocated))
+
   //  perf cnt
   val enqCount = PopCount(io.enq.map(enq => enq.fire && !enq.bits.isLoadReplay)) 
   val deqCount = PopCount(io.replay.map(_.fire)) 
