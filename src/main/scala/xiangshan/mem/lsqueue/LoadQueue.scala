@@ -78,12 +78,14 @@ class LqTriggerIO(implicit p: Parameters) extends XSBundle {
   val lqLoadAddrTriggerHitVec = Output(Vec(3, Bool()))
 }
 
+
 class LqExceptionBuffer(implicit p: Parameters) extends XSModule with HasCircularQueuePtrHelper {
   val io = IO(new Bundle() {
     val redirect = Flipped(Valid(new Redirect))
     val req = Vec(LoadPipelineWidth, Flipped(Valid(new LqWriteBundle)))
     val exceptionAddr = new ExceptionAddrIO
   })
+
 
   val req_valid = RegInit(false.B)
   val req = Reg(new LqWriteBundle)

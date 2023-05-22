@@ -117,6 +117,8 @@ class LoadUnit_S0(implicit p: Parameters) extends XSModule with HasDCacheParamet
   val s0_mask = Wire(UInt(8.W))
   val s0_uop = Wire(new MicroOp)
   val s0_isFirstIssue = Wire(Bool())
+  val s0_hasROBEntry = WireDefault(false.B)
+  val s0_rsIdx = Wire(UInt(log2Up(IssQueSize).W))
   val s0_sqIdx = Wire(new SqPtr)
   val s0_tryFastpath = WireInit(false.B)
   val s0_replayCarry = Wire(new ReplayCarry) // way info for way predict related logic
@@ -232,7 +234,7 @@ class LoadUnit_S0(implicit p: Parameters) extends XSModule with HasDCacheParamet
   }.otherwise {
     io.dcacheReq.bits.cmd  := MemoryOpConstants.M_XRD
   }
-  io.dcacheReq.bits.addr := s0_vaddr
+  io.dcacheReq.bits.vaddr := s0_vaddr
   io.dcacheReq.bits.mask := s0_mask
   io.dcacheReq.bits.data := DontCare
   io.dcacheReq.bits.isFirstIssue := s0_isFirstIssue
@@ -251,6 +253,8 @@ class LoadUnit_S0(implicit p: Parameters) extends XSModule with HasDCacheParamet
   s0_uop := DontCare
   // load flow priority mux
   when(lfsrc_loadReplay_select) {
+    s0_hasROBEntry := true.B
+    s0_rsIdx := io.replay.bits.rsIdx
     s0_vaddr := io.replay.bits.vaddr
     s0_mask := genWmask(io.replay.bits.vaddr, io.replay.bits.uop.ctrl.fuOpType(1, 0))
     s0_uop := io.replay.bits.uop
@@ -278,6 +282,8 @@ class LoadUnit_S0(implicit p: Parameters) extends XSModule with HasDCacheParamet
     s0_vaddr := io.in.bits.src(0) + SignExt(imm12, VAddrBits)
     s0_mask := genWmask(s0_vaddr, io.in.bits.uop.ctrl.fuOpType(1,0))
     s0_uop := io.in.bits.uop
+    s0_hasROBEntry := true.B
+    s0_rsIdx := io.rsIdx
     s0_isFirstIssue := true.B
     s0_sqIdx := io.in.bits.uop.sqIdx
     val issueUopIsPrefetch = WireInit(LSUOpType.isPrefetch(io.in.bits.uop.ctrl.fuOpType))
@@ -318,6 +324,7 @@ class LoadUnit_S0(implicit p: Parameters) extends XSModule with HasDCacheParamet
   io.out.bits.uop := s0_uop
   io.out.bits.uop.cf.exceptionVec(loadAddrMisaligned) := !addrAligned
   io.out.bits.isFirstIssue := s0_isFirstIssue
+  io.out.bits.hasROBEntry := s0_hasROBEntry
   io.out.bits.isPrefetch := isPrefetch
   io.out.bits.isHWPrefetch := isHWPrefetch
   io.out.bits.isLoadReplay := lfsrc_loadReplay_select
@@ -1204,10 +1211,13 @@ class LoadUnit(implicit p: Parameters) extends XSModule
 
   // FIXME: please move this part to LoadQueueReplay 
   io.debug_ls := DontCare
+  // s1
   // io.debug_ls.s1.isBankConflict := load_s1.io.in.fire && (!load_s1.io.dcacheKill && load_s1.io.dcacheBankConflict)
   // io.debug_ls.s1.isLoadToLoadForward := load_s1.io.out.valid && s1_tryPointerChasing && !cancelPointerChasing
   // io.debug_ls.s1.isTlbFirstMiss := io.tlb.resp.valid && io.tlb.resp.bits.miss && io.tlb.resp.bits.debug.isFirstIssue
   // io.debug_ls.s1.isReplayFast := io.lsq.replayFast.valid && io.lsq.replayFast.needreplay
+  // io.debug_ls.s1.vaddr_valid := load_s1.io.in.fire && load_s1.io.in.bits.hasROBEntry
+  // io.debug_ls.s1.vaddr_bits := load_s1.io.in.bits.vaddr
   // io.debug_ls.s1_robIdx := load_s1.io.in.bits.uop.robIdx.value
   // // s2
   // io.debug_ls.s2.isDcacheFirstMiss := load_s2.io.in.fire && load_s2.io.in.bits.isFirstIssue && load_s2.io.dcacheResp.bits.miss
@@ -1215,6 +1225,8 @@ class LoadUnit(implicit p: Parameters) extends XSModule
   // io.debug_ls.s2.isReplaySlow := io.lsq.replaySlow.valid && io.lsq.replaySlow.needreplay
   // io.debug_ls.s2.isLoadReplayTLBMiss := io.lsq.replaySlow.valid && !io.lsq.replaySlow.tlb_hited
   // io.debug_ls.s2.isLoadReplayCacheMiss := io.lsq.replaySlow.valid && !io.lsq.replaySlow.cache_hited
+  // io.debug_ls.s2.paddr_valid := load_s2.io.in.fire && load_s2.io.in.bits.hasROBEntry && !load_s2.io.in.bits.tlbMiss
+  // io.debug_ls.s2.paddr_bits := load_s2.io.in.bits.paddr
   // io.debug_ls.replayCnt := DontCare
   // io.debug_ls.s2_robIdx := load_s2.io.in.bits.uop.robIdx.value
 
