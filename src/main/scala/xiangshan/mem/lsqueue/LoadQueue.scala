@@ -131,7 +131,7 @@ class LqExceptionBuffer(implicit p: Parameters) extends XSModule with HasCircula
       selectOldest(left._1 ++ right._1, left._2 ++ right._2)
     }
   }
-
+  
   val reqSel = selectOldest(s2_enqueue, s2_req)
 
   when (req_valid) {
